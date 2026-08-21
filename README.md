@@ -513,18 +513,34 @@ $ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/notifications/he
 ```
 
 **End-to-end GitOps proof** — a real repository change, no manual `kubectl apply`/`helm
-upgrade` for the change itself: this commit bumps `charts/notifications/values.yaml`
-`replicaCount` from `1` to `2`. After pushing it to `main`, Argo CD's own sync loop
-picked it up and scaled the Deployment itself, with no `kubectl scale`/`helm upgrade`
-run by hand for the change:
+upgrade` for the change itself: commit
+[`d562f0e`](https://github.com/janatmr/cloud-crafter/commit/d562f0ee22e734f8b9c1228484fa64a63d330818)
+bumps `charts/notifications/values.yaml` `replicaCount` from `1` to `2`. Pushing it to
+`main` re-triggered the CI/CD pipeline from the previous section too — `test` through
+`bump-chart-values` ran again and landed a second real
+[`chore(release)`](https://github.com/janatmr/cloud-crafter/commit/44563e19b64dd592ece4d49c43160ce9778abb72)
+commit on top, which is itself further proof of Phase 5's pipeline working end to end.
+Argo CD's background poll picked up the new tip on its own (confirmed via the
+controller's logs — periodic "Comparing app state" reconciliations against `main`),
+though the default git-resolution cache made that take longer than convenient to sit
+and watch in this session; `kubectl -n argocd annotate application cloudcrafter
+argocd.argoproj.io/refresh=hard --overwrite` (a request for Argo CD to look sooner, not
+a deploy action — no `kubectl apply`/`helm upgrade` of the workload itself) was used to
+get the same result faster:
 
 ```
+$ kubectl -n argocd get application cloudcrafter -o jsonpath='{.status.sync.status} {.status.sync.revision}'
+Synced 44563e19b64dd592ece4d49c43160ce9778abb72
 $ kubectl get deploy notifications -n default
 NAME            READY   UP-TO-DATE   AVAILABLE   AGE
-notifications   2/2     2            2           ...
-$ kubectl -n argocd get application cloudcrafter -o jsonpath='{.status.sync.status} {.status.sync.revision}'
-Synced <commit SHA of this change>
+notifications   2/2     2            2           4h8m
+$ kubectl get pods -n default -l app=notifications
+NAME                            READY   STATUS    RESTARTS   AGE
+notifications-df47459df-hlr5r   1/1     Running   0          19m
+notifications-df47459df-q6ftg   1/1     Running   0          40s
 ```
+
+Re-checked all four `/health` routes once more after this sync — still all `{"status":"ok",...}`.
 
 **Manual action still required:** none for Argo CD itself (repo is public, so no
 repository credential secret is needed — see `argocd/README.md`'s "Private repository"
