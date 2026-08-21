@@ -1,0 +1,6 @@
+{
+  "name": "receipt-notification",
+  "version": "1.0.0",
+  "description": "CloudCrafter Lambda: S3 receipt-upload event -> Notifications service.",
+  "main": "index.js"
+}

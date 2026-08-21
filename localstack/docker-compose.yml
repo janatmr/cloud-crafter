@@ -1,0 +1,26 @@
+services:
+  localstack:
+    image: localstack/localstack:4.0
+    container_name: cloudcrafter-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,lambda
+      - DEBUG=${DEBUG:-0}
+      # Lambda function containers must land on the same Docker network as the
+      # Minikube node so they can reach the in-cluster Notifications service
+      # through the Ingress (see ../README.md "LocalStack" section — Risk 3).
+      - LAMBDA_DOCKER_NETWORK=${MINIKUBE_DOCKER_NETWORK:-minikube}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./volume:/var/lib/localstack"
+      - "./lambda:/lambda:ro"
+    networks:
+      minikube:
+        ipv4_address: ${LOCALSTACK_IP:-192.168.49.20}
+
+networks:
+  minikube:
+    name: ${MINIKUBE_DOCKER_NETWORK:-minikube}
+    external: true

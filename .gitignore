@@ -135,6 +135,10 @@ dist
 *.key
 *.pem
 
+# LocalStack runtime state and packaged Lambda artifacts (rebuilt by setup.sh)
+localstack/volume/
+localstack/lambda/*/function.zip
+
 # yarn v3
 .pnp.*
 .yarn/*
