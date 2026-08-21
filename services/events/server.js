@@ -31,4 +31,8 @@ app.post("/events", (req, res) => {
   res.status(201).json(event);
 });
 
-app.listen(PORT, () => console.log(`Events service listening on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Events service listening on port ${PORT}`));
+}
+
+module.exports = app;

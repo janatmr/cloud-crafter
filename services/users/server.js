@@ -7,8 +7,11 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const PRIVATE_KEY = fs.readFileSync(path.join(__dirname, "private.key"), "utf8");
-const PUBLIC_KEY = fs.readFileSync(path.join(__dirname, "public.key"), "utf8");
+
+const PRIVATE_KEY_PATH = process.env.JWT_PRIVATE_KEY_PATH || path.join(__dirname, "private.key");
+const PUBLIC_KEY_PATH = process.env.JWT_PUBLIC_KEY_PATH || path.join(__dirname, "public.key");
+const PRIVATE_KEY = fs.readFileSync(PRIVATE_KEY_PATH, "utf8");
+const PUBLIC_KEY = fs.readFileSync(PUBLIC_KEY_PATH, "utf8");
 
 // Demo user store — CloudCrafter is a learning project, this is intentionally in-memory.
 const USERS = [
@@ -49,4 +52,8 @@ app.get("/protected", (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Users service listening on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Users service listening on port ${PORT}`));
+}
+
+module.exports = app;

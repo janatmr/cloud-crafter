@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+*.key
+*.pem
+.env
+*.test.js
+.dockerignore
+Dockerfile

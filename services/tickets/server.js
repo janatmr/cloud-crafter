@@ -30,4 +30,8 @@ app.post("/tickets", (req, res) => {
   res.status(201).json(ticket);
 });
 
-app.listen(PORT, () => console.log(`Tickets service listening on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Tickets service listening on port ${PORT}`));
+}
+
+module.exports = app;
