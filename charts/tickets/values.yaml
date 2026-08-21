@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: tickets
+  tag: "1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+resources:
+  requests:
+    cpu: 75m
+    memory: 96Mi
+  limits:
+    cpu: 200m
+    memory: 192Mi
+
+rollingUpdate:
+  maxUnavailable: 25%
+  maxSurge: 25%
+
+env:
+  - name: PORT
+    value: "3000"
+
+# LocalStack S3 endpoint for ticket receipt uploads (spec §9.7/§38) — left blank by
+# default so the chart works even before LocalStack is wired up; set these to enable
+# the receipt -> S3 -> Lambda -> notifications flow.
+s3:
+  # Default matches localstack/docker-compose.yml's static LOCALSTACK_IP on the
+  # "minikube" Docker network (see localstack/scripts/setup.sh) — reachable from
+  # in-cluster pods. Override for other environments.
+  endpoint: "http://192.168.49.20:4566"
+  bucket: "cloudcrafter-ticket-receipts"
+  region: "us-east-1"
+  accessKeyId: "test"
+  secretAccessKey: "test"

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "users.name" . }}
+  labels:
+    {{- include "users.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.rollingUpdate.maxSurge }}
+  selector:
+    matchLabels:
+      {{- include "users.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "users.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ include "users.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+            {{- if .Values.jwtKeys.enabled }}
+            - name: JWT_PRIVATE_KEY_PATH
+              value: {{ .Values.jwtKeys.privateKeyPath | quote }}
+            - name: JWT_PUBLIC_KEY_PATH
+              value: {{ .Values.jwtKeys.publicKeyPath | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.jwtKeys.enabled }}
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: {{ .Values.jwtKeys.mountPath }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.jwtKeys.enabled }}
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: {{ .Values.jwtKeys.secretName }}
+      {{- end }}

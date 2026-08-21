@@ -139,6 +139,10 @@ dist
 localstack/volume/
 localstack/lambda/*/function.zip
 
+# Helm dependency build output for the umbrella chart (rebuilt by `helm dependency build`)
+charts/cloudcrafter/charts/*.tgz
+charts/cloudcrafter/Chart.lock
+
 # yarn v3
 .pnp.*
 .yarn/*

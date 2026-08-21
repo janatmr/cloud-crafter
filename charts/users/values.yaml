@@ -1,0 +1,37 @@
+replicaCount: 2
+
+image:
+  repository: users
+  tag: "1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+# Rolling update tuned for zero-downtime JWT key rotation (spec §32) — at least
+# one ready replica throughout, never all replicas down at once.
+rollingUpdate:
+  maxUnavailable: 0
+  maxSurge: 1
+
+env:
+  - name: PORT
+    value: "3000"
+
+# JWT signing/verification keys are never baked into the image or values.yaml —
+# they're mounted from a Kubernetes Secret (created in Phase 9: `users-jwt-keys`).
+jwtKeys:
+  enabled: true
+  secretName: users-jwt-keys
+  mountPath: /etc/jwt-keys
+  privateKeyPath: /etc/jwt-keys/private.key
+  publicKeyPath: /etc/jwt-keys/public.key

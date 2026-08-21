@@ -1,0 +1,9 @@
+ingress:
+  enabled: true
+  className: nginx
+  host: cloudcrafter.local
+
+users: {}
+events: {}
+tickets: {}
+notifications: {}
