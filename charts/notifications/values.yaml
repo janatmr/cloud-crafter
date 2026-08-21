@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/janatmr/cloud-crafter/notifications
-  tag: "1.0.0"
+  tag: "08f92d765965f80fdfff5d10fa06e2d96582b662"
   pullPolicy: IfNotPresent
 
 service:
