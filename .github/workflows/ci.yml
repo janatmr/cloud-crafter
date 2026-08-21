@@ -1,0 +1,175 @@
+name: CI/CD
+
+# Validation runs on every push and every PR into main; the release job (image build +
+# push + chart bump) only runs on a push that lands on main (spec §17/§18 — this
+# workflow tests/builds/pushes images and updates desired-state chart values, it never
+# deploys to a cluster; Argo CD owns sync).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  SERVICES: users events tickets notifications
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: janatmr/cloud-crafter
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [users, events, tickets, notifications]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/${{ matrix.service }}
+        run: npm ci
+
+      # No lint script exists on any service yet (spec §17 allows skipping when none is
+      # configured) — don't invent a linter that wasn't asked for.
+      - name: Lint (if configured)
+        working-directory: services/${{ matrix.service }}
+        run: |
+          if npm run | grep -q '^  lint$'; then
+            npm run lint
+          else
+            echo "No lint script configured for ${{ matrix.service }} — skipping."
+          fi
+
+      # The users service reads an RS256 keypair at startup (JWT_PRIVATE_KEY_PATH /
+      # JWT_PUBLIC_KEY_PATH); no real key is ever committed, so CI generates a
+      # throwaway one just for the test run.
+      - name: Generate ephemeral JWT keypair
+        if: matrix.service == 'users'
+        run: |
+          openssl genrsa -out "$RUNNER_TEMP/jwt-private.key" 2048
+          openssl rsa -in "$RUNNER_TEMP/jwt-private.key" -pubout -out "$RUNNER_TEMP/jwt-public.key"
+          echo "JWT_PRIVATE_KEY_PATH=$RUNNER_TEMP/jwt-private.key" >> "$GITHUB_ENV"
+          echo "JWT_PUBLIC_KEY_PATH=$RUNNER_TEMP/jwt-public.key" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        working-directory: services/${{ matrix.service }}
+        run: npm test
+
+  docker-build:
+    name: docker-build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [users, events, tickets, notifications]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (validation only, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: false
+          tags: ${{ matrix.service }}:ci-validate
+
+  helm-validate:
+    name: helm-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: helm lint (service charts)
+        run: helm lint charts/users charts/events charts/tickets charts/notifications
+
+      - name: helm dependency build (umbrella chart)
+        run: helm dependency build charts/cloudcrafter
+
+      - name: helm lint (umbrella chart)
+        run: helm lint charts/cloudcrafter
+
+      - name: helm template (render validation)
+        run: helm template cloudcrafter charts/cloudcrafter
+
+  # Builds + pushes immutable-tagged images to GHCR. Runs only for a push that lands on
+  # main, and only once test/docker-build/helm-validate all pass (spec §17).
+  release-images:
+    name: release-images (${{ matrix.service }})
+    needs: [test, docker-build, helm-validate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [users, events, tickets, notifications]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read service version
+        id: version
+        run: echo "value=$(node -p "require('./services/${{ matrix.service }}/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.service }}:${{ steps.version.outputs.value }}
+
+  # Updates each chart's image.tag to the immutable commit SHA just pushed above — the
+  # "versioned deployment artifact -> Git repository desired state" step (spec §18);
+  # Argo CD (Phase 6) is what actually syncs this to a cluster, not this workflow.
+  bump-chart-values:
+    name: bump-chart-values
+    needs: [release-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set image.tag to the release SHA in each service chart
+        run: |
+          set -euo pipefail
+          for service in $SERVICES; do
+            sed -i "s/^\(\s*tag:\s*\).*/\1\"${{ github.sha }}\"/" "charts/$service/values.yaml"
+          done
+
+      - name: Commit and push if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- charts; then
+            echo "No chart value changes to commit."
+            exit 0
+          fi
+          git add charts/*/values.yaml
+          git commit -m "chore(release): bump image tags to ${{ github.sha }} [skip ci]"
+          git push origin HEAD:main

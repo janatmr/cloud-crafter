@@ -16,7 +16,7 @@ placeholders until their phase lands.
 - [x] Phase 2 — Local Kubernetes baseline (Minikube)
 - [x] Phase 3 — LocalStack event flow
 - [x] Phase 4 — Helm charts
-- [ ] Phase 5 — CI/CD
+- [x] Phase 5 — CI/CD
 - [ ] Phase 6 — Argo CD
 - [ ] Phase 7 — Multi-cloud namespace proof
 - [ ] Phase 8 — Observability
@@ -349,3 +349,78 @@ returns a valid RS256 token.
 **Environment note:** Helm was installed as a portable binary (no admin rights available
 for the system package manager in this environment) rather than a system-wide install —
 functionally identical, just not on a machine-wide PATH by default.
+
+**Local Minikube note (post-Phase 5):** the four service charts' `image.repository`
+default now points at `ghcr.io/janatmr/cloud-crafter/<service>` (see below), since that's
+what a real cluster needs to pull from. A Minikube demo still builds images straight into
+Minikube's own Docker daemon and has no route to GHCR, so use the override file:
+
+```sh
+eval $(minikube docker-env)
+for s in users events tickets notifications; do
+  docker build -t $s:1.0.0 services/$s
+done
+helm upgrade --install cloudcrafter ./charts/cloudcrafter -f charts/cloudcrafter/values-minikube.yaml
+```
+
+## CI/CD (spec §17, §18)
+
+`.github/workflows/ci.yml` — one workflow, several jobs:
+
+| Job | Trigger | What it does |
+|---|---|---|
+| `test` (matrix: 4 services) | every push, every PR into `main` | `npm ci` + `npm test` per service (Phase 1's `node --test` suites). The `users` service needs an RS256 keypair to boot; CI generates a throwaway one with `openssl` per run — no real key is ever committed or reused. |
+| `docker-build` (matrix: 4 services) | every push, every PR into `main` | `docker build` for each `Dockerfile`, validation only, no push. |
+| `helm-validate` | every push, every PR into `main` | `helm lint` on all 5 charts, `helm dependency build` + `helm lint` + `helm template` on the umbrella chart. Fails the workflow on any Helm error. |
+| `release-images` (matrix: 4 services) | push to `main` only, after `test`/`docker-build`/`helm-validate` pass | Builds and pushes each image to `ghcr.io/janatmr/cloud-crafter/<service>`, tagged with **both** the Git commit SHA and the service's SemVer version (`package.json`'s `version`) — never `latest` (spec §17). |
+| `bump-chart-values` | after `release-images` | Sets `image.tag` in each `charts/<service>/values.yaml` to the just-pushed commit SHA and commits/pushes that to `main` (`[skip ci]`) — the "versioned deployment artifact → Git repository desired state" step in spec §18's diagram. This workflow never runs `kubectl`/`helm upgrade` against any cluster; Argo CD (Phase 6) is what turns this commit into a real deployment. |
+
+No lint script exists in any service's `package.json` yet, so the `test` job checks for
+one and skips cleanly if absent (spec §17 explicitly allows this — inventing an ESLint
+setup nobody asked for would violate the "don't add tools the spec doesn't call for"
+rule).
+
+**Required GitHub configuration (manual — this environment has no org/repo admin
+credentials to automate these):**
+
+1. **GHCR push permission.** The `release-images`/`bump-chart-values` jobs declare
+   `permissions: packages: write` / `contents: write` in the workflow file itself, which
+   is sufficient in most repos. If pushes to GHCR or back to `main` fail with a 403,
+   check **Settings → Actions → General → Workflow permissions** isn't force-overriding
+   this to read-only.
+2. **GHCR package visibility.** GHCR packages are private by default. After the first
+   successful `release-images` run, either mark each of the four packages public (repo →
+   Packages tab → package settings), or provision `imagePullSecret`s in whatever cluster
+   pulls them (relevant starting Phase 6/7).
+3. **Branch protection for `main` (spec §12).** Require a PR before merging, set the
+   required status checks to `test (users)`, `test (events)`, `test (tickets)`,
+   `test (notifications)`, `docker-build (*)`, and `helm-validate`, and restrict direct
+   pushes. This creates a real tension with `bump-chart-values` pushing straight to
+   `main` — once protection is turned on, either add `github-actions[bot]` to the
+   "allow specified actors to bypass required pull requests" list, or change that job to
+   open a PR (e.g. via `peter-evans/create-pull-request`) with auto-merge instead of
+   pushing directly. Left as a follow-up decision rather than guessed at here, since it
+   changes the workflow's behavior and this environment has no way to test either path
+   against real branch protection rules.
+
+**Validated locally** (this environment has no way to actually execute a GitHub Actions
+run or push to GHCR, so these are the same commands the workflow runs, executed
+directly):
+
+```
+$ npm ci && npm test        # in each services/<name>, ephemeral keypair for users
+... all four: 0 failing
+
+$ docker build -t users:ci-validate services/users
+... builds clean
+
+$ helm lint charts/users charts/events charts/tickets charts/notifications
+4 chart(s) linted, 0 chart(s) failed
+$ helm dependency build charts/cloudcrafter && helm lint charts/cloudcrafter
+1 chart(s) linted, 0 chart(s) failed
+$ helm template cloudcrafter charts/cloudcrafter
+... image: "ghcr.io/janatmr/cloud-crafter/users:1.0.0"  (etc. for all four)
+```
+
+Actually triggering the workflow requires pushing this branch to GitHub — not done as
+part of writing these files; see the note at the end of this section before doing so.
