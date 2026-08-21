@@ -1,0 +1,12 @@
+# Multi-cloud namespace proof (spec §20/§21) — the "aws" side.
+#
+# This is the ONLY thing that differs between namespaces: the Ingress host. It layers
+# on top of values-minikube.yaml (same local images this environment already has) with
+# `-f`, exactly like the existing values-minikube.yaml overlay pattern — no chart
+# source changes, no charts/aws/ directory, no namespace-conditional code anywhere in
+# services/ or charts/. Deploy with:
+#
+#   helm upgrade --install cloudcrafter ./charts/cloudcrafter -n aws --create-namespace \
+#     -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-aws.yaml
+ingress:
+  host: cloudcrafter-aws.local

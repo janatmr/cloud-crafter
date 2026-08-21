@@ -1,0 +1,8 @@
+# Multi-cloud namespace proof (spec §20/§21) — the "google-cloud" side. Mirrors
+# values-aws.yaml: only the Ingress host differs, layered on top of
+# values-minikube.yaml. Deploy with:
+#
+#   helm upgrade --install cloudcrafter ./charts/cloudcrafter -n google-cloud --create-namespace \
+#     -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-google-cloud.yaml
+ingress:
+  host: cloudcrafter-google-cloud.local

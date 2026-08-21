@@ -18,7 +18,7 @@ placeholders until their phase lands.
 - [x] Phase 4 — Helm charts
 - [x] Phase 5 — CI/CD
 - [x] Phase 6 — Argo CD
-- [ ] Phase 7 — Multi-cloud namespace proof
+- [x] Phase 7 — Multi-cloud namespace proof
 - [ ] Phase 8 — Observability
 - [ ] Phase 9 — JWT key rotation hardening
 - [ ] Phase 10 — Final verification & demo
@@ -545,3 +545,134 @@ Re-checked all four `/health` routes once more after this sync — still all `{"
 **Manual action still required:** none for Argo CD itself (repo is public, so no
 repository credential secret is needed — see `argocd/README.md`'s "Private repository"
 section for what that would look like if it ever becomes private).
+
+---
+
+## Multi-cloud namespace proof (spec §20/§21)
+
+Same `charts/cloudcrafter` umbrella chart, same release name, deployed unmodified into
+two new namespaces — `aws` and `google-cloud` — alongside the existing Argo-CD-managed
+`default` deployment. No `charts/aws/`, no `charts/google-cloud/`, no
+namespace-conditional code anywhere in `services/` or `charts/`.
+
+The only thing that differs per namespace is the Ingress host, supplied as a values
+overlay in the same style as the existing `values-minikube.yaml` overlay:
+`charts/cloudcrafter/values-aws.yaml` sets `ingress.host: cloudcrafter-aws.local`,
+`charts/cloudcrafter/values-google-cloud.yaml` sets
+`ingress.host: cloudcrafter-google-cloud.local`. This was necessary because the
+Ingress-nginx controller is a single cluster-wide resource watching all namespaces —
+three `Ingress` objects all claiming host `cloudcrafter.local` would collide. Distinct
+hosts let all three deployments (`default`, `aws`, `google-cloud`) resolve
+independently through the same controller with zero ambiguity, which is a stronger proof
+than just port-forwarding past the Ingress entirely.
+
+This was deployed with plain `helm upgrade --install` (a manual step, not Argo CD — the
+spec's Phase 7 ask is proving the chart itself is portable across namespaces, not wiring
+a second GitOps target):
+
+```
+$ helm upgrade --install cloudcrafter ./charts/cloudcrafter -n aws --create-namespace \
+    -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-aws.yaml
+Release "cloudcrafter" does not exist. Installing it now.
+STATUS: deployed
+
+$ helm upgrade --install cloudcrafter ./charts/cloudcrafter -n google-cloud --create-namespace \
+    -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-google-cloud.yaml
+Release "cloudcrafter" does not exist. Installing it now.
+STATUS: deployed
+```
+
+(`values-minikube.yaml` is layered in for the same reason as Phase 6 — GHCR package
+visibility is still an open manual action, so this cluster pulls the local
+`docker build`-tagged images rather than `ghcr.io/janatmr/cloud-crafter/*` directly.)
+
+The `users` Deployments in both new namespaces initially sat in `ContainerCreating` —
+`kubectl describe pod` showed `MountVolume.SetUp failed ... secret "users-jwt-keys" not
+found`. The `users-jwt-keys` Secret is namespace-scoped and, before this, only existed in
+`default` (from the Phase 2 baseline note). Rather than share one namespace's real key
+material across three notionally-independent "clouds," a **distinct** throwaway RS256
+keypair was generated per new namespace with `openssl` and loaded the same imperative way
+as the `default` bootstrap:
+
+```
+$ kubectl create secret generic users-jwt-keys -n aws --from-file=private.key=... --from-file=public.key=...
+secret/users-jwt-keys created
+$ kubectl create secret generic users-jwt-keys -n google-cloud --from-file=private.key=... --from-file=public.key=...
+secret/users-jwt-keys created
+```
+
+After that, both namespaces reached full health:
+
+```
+$ kubectl get deploy,svc,ingress -n aws
+NAME                            READY   UP-TO-DATE   AVAILABLE
+deployment.apps/events          1/1     1            1
+deployment.apps/notifications   1/1     1            1
+deployment.apps/tickets         1/1     1            1
+deployment.apps/users           2/2     2            2
+
+NAME                    TYPE        CLUSTER-IP       PORT(S)
+service/events          ClusterIP   10.110.182.217   3000/TCP
+service/notifications   ClusterIP   10.99.160.187    3000/TCP
+service/tickets         ClusterIP   10.107.189.218   3000/TCP
+service/users           ClusterIP   10.111.244.0     3000/TCP
+
+NAME                                             CLASS   HOSTS
+ingress.networking.k8s.io/cloudcrafter-ingress   nginx   cloudcrafter-aws.local
+
+$ kubectl get deploy,svc,ingress -n google-cloud
+NAME                            READY   UP-TO-DATE   AVAILABLE
+deployment.apps/events          1/1     1            1
+deployment.apps/notifications   1/1     1            1
+deployment.apps/tickets         1/1     1            1
+deployment.apps/users           2/2     2            2
+
+NAME                    TYPE        CLUSTER-IP      PORT(S)
+service/events          ClusterIP   10.104.175.72   3000/TCP
+service/notifications   ClusterIP   10.106.71.241   3000/TCP
+service/tickets         ClusterIP   10.100.52.236   3000/TCP
+service/users           ClusterIP   10.102.224.49   3000/TCP
+
+NAME                                             CLASS   HOSTS
+ingress.networking.k8s.io/cloudcrafter-ingress   nginx   cloudcrafter-google-cloud.local
+```
+
+Each namespace has its own Pods, Services, Deployments and Secret — no shared ClusterIP,
+no shared key material, entirely independent CLUSTER-IPs (spec §21). Verified both ways
+per the spec's own verification recipe — direct Service port-forward (bypassing Ingress
+entirely) and through the shared Ingress controller with each namespace's distinct host:
+
+```
+$ kubectl port-forward -n aws svc/users 18001:3000 &         (repeat for events/tickets/notifications, 18002-18004)
+$ curl -s http://127.0.0.1:18001/health
+{"status":"ok","service":"users"}
+... (events/tickets/notifications all {"status":"ok",...})
+
+$ kubectl port-forward -n google-cloud svc/users 18011:3000 &  (repeat for events/tickets/notifications, 18012-18014)
+$ curl -s http://127.0.0.1:18011/health
+{"status":"ok","service":"users"}
+... (events/tickets/notifications all {"status":"ok",...})
+
+$ kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 18080:80 &
+$ curl -H "Host: cloudcrafter-aws.local" http://127.0.0.1:18080/api/users/health
+{"status":"ok","service":"users"}
+$ curl -H "Host: cloudcrafter-google-cloud.local" http://127.0.0.1:18080/api/users/health
+{"status":"ok","service":"users"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/users/health
+{"status":"ok","service":"users"}
+```
+
+All three namespaces (`default`, `aws`, `google-cloud`) answer independently through the
+same Ingress controller with no host collision, and `helm list -n aws` / `helm list -n
+google-cloud` both show the identical `cloudcrafter-1.0.0` chart version that's running
+in `default` — the same artifact, three independent deployments.
+
+Intra-namespace service calls already use bare service names
+(`http://notifications:3000` — see `localstack/lambda/receipt-notification/index.js`'s
+`NOTIFICATIONS_URL`), which Kubernetes DNS resolves per-namespace automatically; nothing
+needed to change here for the chart to be portable across namespaces.
+
+**Manual action still required:** none. Both namespaces are fully deployed and verified
+in this environment. If a real multi-account/multi-cluster setup is ever used instead of
+one Minikube cluster with two namespaces, the same `helm upgrade --install` commands
+apply unchanged per target cluster.
