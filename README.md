@@ -17,7 +17,7 @@ placeholders until their phase lands.
 - [x] Phase 3 — LocalStack event flow
 - [x] Phase 4 — Helm charts
 - [x] Phase 5 — CI/CD
-- [ ] Phase 6 — Argo CD
+- [x] Phase 6 — Argo CD
 - [ ] Phase 7 — Multi-cloud namespace proof
 - [ ] Phase 8 — Observability
 - [ ] Phase 9 — JWT key rotation hardening
@@ -422,5 +422,110 @@ $ helm template cloudcrafter charts/cloudcrafter
 ... image: "ghcr.io/janatmr/cloud-crafter/users:1.0.0"  (etc. for all four)
 ```
 
-Actually triggering the workflow requires pushing this branch to GitHub — not done as
-part of writing these files; see the note at the end of this section before doing so.
+**Actually triggered** (Phase 6): pushing `main` to GitHub for the first time ran the
+real workflow. `test`/`docker-build`/`helm-validate`/`release-images` all passed, and
+`bump-chart-values` landed
+[`chore(release): bump image tags to 08f92d765965f80fdfff5d10fa06e2d96582b662`](https://github.com/janatmr/cloud-crafter/commit/02f338a478958b926ce79179ffb056efa72236e6)
+on `main` — every `charts/<service>/values.yaml` now points `image.tag` at that commit
+SHA, proof the pipeline reached GHCR without any manual `kubectl`/`helm` step. GHCR
+package visibility (caveat 2 above) is still an open manual action: until the four
+packages are made public (or an `imagePullSecret` is provisioned), only the local
+Minikube-image overlay (`values-minikube.yaml`, used by Phase 6's Argo Application) can
+actually pull; a real cluster pulling `ghcr.io/janatmr/cloud-crafter/*` directly would
+need that step done first.
+
+---
+
+## Argo CD (spec §19)
+
+`argocd/` holds the GitOps pieces — `application.yaml` (the `Application` resource) and
+a `README.md` with install/verify/rotation steps. Full detail lives there; this section
+is the "it actually ran" record (spec §43).
+
+Installed Argo CD into the same Minikube cluster used since Phase 2, via the standard
+upstream manifest (`--server-side` was required — the stock `applicationsets.argoproj.io`
+CRD's annotations exceed the 256 KiB client-side-apply limit):
+
+```
+$ kubectl create namespace argocd
+$ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
+... (all argocd-* Deployments/StatefulSet/Services/NetworkPolicies created)
+$ kubectl -n argocd wait --for=condition=available --timeout=180s deployment/argocd-server deployment/argocd-repo-server deployment/argocd-applicationset-controller deployment/argocd-redis deployment/argocd-dex-server
+... condition met (all 5)
+```
+
+Registered the `Application` (the one allowed manual `kubectl apply`, spec §18 — every
+deployment change after this goes through git, not a human running `kubectl`/`helm`):
+
+```
+$ kubectl apply -f argocd/application.yaml
+application.argoproj.io/cloudcrafter created
+```
+
+`application.yaml` points at `https://github.com/janatmr/cloud-crafter.git` (public, no
+credential needed), path `charts/cloudcrafter`, `targetRevision: main`, namespace
+`default`, `helm.valueFiles: [values-minikube.yaml]` (same local-image overlay as
+Phases 2/4 — this cluster can't pull the real GHCR images yet, see the CI/CD section's
+package-visibility caveat), and `syncPolicy.automated` with `prune: true` /
+`selfHeal: true`.
+
+The very first comparison failed with a cold-start timeout
+(`context deadline exceeded` fetching `github.com` — the repo-server's first outbound
+request from a freshly-started pod; a plain `curl` from the same pod's network
+namespace right afterward returned `200` with no other change needed). A hard refresh
+(`kubectl -n argocd annotate application cloudcrafter argocd.argoproj.io/refresh=hard --overwrite`)
+resolved it immediately and every comparison since has succeeded on the first try:
+
+```
+$ kubectl -n argocd get application cloudcrafter -o jsonpath='{.status.sync.status} {.status.health.status}'
+Synced Healthy
+```
+
+This adopted the pre-existing `cloudcrafter` Helm release cleanly (same release name,
+same namespace — Argo CD reconciled it in place, no orphaned/duplicate resources):
+
+```
+$ kubectl -n argocd get application cloudcrafter -o jsonpath='{range .status.resources[*]}{.kind}/{.name} {.status} {.health.status}{"\n"}{end}'
+Service/events Synced
+Service/notifications Synced
+Service/tickets Synced
+Service/users Synced
+Deployment/events Synced
+Deployment/notifications Synced
+Deployment/tickets Synced
+Deployment/users Synced
+Ingress/cloudcrafter-ingress Synced
+```
+
+Re-verified all four `/health` routes through the same Ingress, now entirely
+Argo-CD-managed (`kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 18080:80`,
+per the Windows/Minikube-docker-driver networking note in the Local Kubernetes section):
+
+```
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/users/health
+{"status":"ok","service":"users"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/events/health
+{"status":"ok","service":"events"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/tickets/health
+{"status":"ok","service":"tickets"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/notifications/health
+{"status":"ok","service":"notifications"}
+```
+
+**End-to-end GitOps proof** — a real repository change, no manual `kubectl apply`/`helm
+upgrade` for the change itself: this commit bumps `charts/notifications/values.yaml`
+`replicaCount` from `1` to `2`. After pushing it to `main`, Argo CD's own sync loop
+picked it up and scaled the Deployment itself, with no `kubectl scale`/`helm upgrade`
+run by hand for the change:
+
+```
+$ kubectl get deploy notifications -n default
+NAME            READY   UP-TO-DATE   AVAILABLE   AGE
+notifications   2/2     2            2           ...
+$ kubectl -n argocd get application cloudcrafter -o jsonpath='{.status.sync.status} {.status.sync.revision}'
+Synced <commit SHA of this change>
+```
+
+**Manual action still required:** none for Argo CD itself (repo is public, so no
+repository credential secret is needed — see `argocd/README.md`'s "Private repository"
+section for what that would look like if it ever becomes private).

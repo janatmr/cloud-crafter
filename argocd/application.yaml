@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloudcrafter
+  namespace: argocd
+  finalizers:
+    # Ensures `kubectl delete -f application.yaml` also cleans up the deployed
+    # resources instead of leaving them orphaned in the cluster.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/janatmr/cloud-crafter.git
+    targetRevision: main
+    path: charts/cloudcrafter
+    helm:
+      # Local-Minikube overlay (Phase 2/4 style): points every subchart at the
+      # bare image names built straight into Minikube's Docker daemon, since this
+      # cluster has no route to pull the real ghcr.io/janatmr/cloud-crafter/*
+      # images published by the Phase 5 CI release job.
+      valueFiles:
+        - values-minikube.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
