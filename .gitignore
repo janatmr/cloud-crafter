@@ -39,6 +39,7 @@ build/Release
 
 # Dependency directories
 node_modules/
+package-lock.json
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -127,6 +128,9 @@ dist
 
 # pnpm
 .pnpm-store
+
+# Mac system files
+.DS_Store
 
 # yarn v3
 .pnp.*
