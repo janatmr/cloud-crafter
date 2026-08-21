@@ -39,7 +39,6 @@ build/Release
 
 # Dependency directories
 node_modules/
-package-lock.json
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -131,6 +130,10 @@ dist
 
 # Mac system files
 .DS_Store
+
+# Private/public keys — never commit real key material (see services/users README)
+*.key
+*.pem
 
 # yarn v3
 .pnp.*
