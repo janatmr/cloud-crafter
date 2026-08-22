@@ -895,7 +895,24 @@ hook was also applied there with a one-off `kubectl patch deployment/users -n de
 back in the Local Kubernetes section, made permanent by the chart commit rather than
 left as a manual, undocumented drift.
 
-**Manual action still required:** push the chart commit so Argo CD's next sync (or a
-forced refresh, per the Argo CD section) reconciles `default`'s `Deployment/users`
-declaratively — right now it matches the chart only because of the imperative patch
-above.
+**Pushed and reconciled.** Commit
+[`bad0f4d`](https://github.com/janatmr/cloud-crafter/commit/bad0f4d6fb1ff2fb22ef3a4dd84ce604401fcc07)
+carries the chart fix; its CI run passed
+([32542703006](https://github.com/janatmr/cloud-crafter/actions/runs/32542703006),
+`test`/`docker-build`/`helm-validate`/`release-images` all green), and Argo CD picked it
+up on its own without needing the manual hard-refresh this project's earlier phases
+sometimes needed:
+
+```
+$ kubectl -n argocd get application cloudcrafter -o jsonpath='{.status.sync.status} {.status.health.status} {.status.sync.revision}'
+Synced Healthy bad0f4d6fb1ff2fb22ef3a4dd84ce604401fcc07
+```
+
+`default`'s `Deployment/users` now carries the `preStop` hook because the chart says so,
+not because of the earlier imperative patch — the same object, now fully
+git-reconciled.
+
+**Manual action still required:** none. The `aws`/`google-cloud` namespaces already
+picked up the fix via the direct `helm upgrade` used to validate it (see above); they are
+not Argo CD-managed, so they don't get this commit automatically and would need the same
+`helm upgrade` re-run if verifying them again after a future chart change.
