@@ -1,0 +1,170 @@
+# Wraps dashboards/cloudcrafter-dashboard.json so Grafana's dashboard sidecar
+# (enabled via ../grafana/values.yaml, watching the grafana_dashboard=1 label) loads
+# it automatically (spec §25) — no manual dashboard import. Regenerate after editing
+# the JSON with:
+#   kubectl create configmap cloudcrafter-dashboard \
+#     --from-file=cloudcrafter-dashboard.json=observability/grafana/dashboards/cloudcrafter-dashboard.json \
+#     -n monitoring --dry-run=client -o yaml > observability/grafana/dashboard-configmap.yaml
+# then re-add the grafana_dashboard: "1" label this file needs.
+apiVersion: v1
+data:
+  cloudcrafter-dashboard.json: |
+    {
+      "title": "CloudCrafter",
+      "uid": "cloudcrafter-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "timezone": "browser",
+      "time": { "from": "now-30m", "to": "now" },
+      "refresh": "10s",
+      "tags": ["cloudcrafter"],
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(up{job=~\"users|events|tickets|notifications\"}, namespace)",
+            "current": { "text": "default", "value": "default" },
+            "includeAll": true,
+            "multi": false
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Service Health (up)",
+          "type": "stat",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "up{job=~\"users|events|tickets|notifications\", namespace=\"$namespace\"}",
+              "legendFormat": "{{job}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [{ "value": 0, "color": "red" }, { "value": 1, "color": "green" }] }
+            }
+          },
+          "options": { "textMode": "value_and_name", "colorMode": "background" }
+        },
+        {
+          "id": 2,
+          "title": "Pod Readiness",
+          "type": "table",
+          "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "kube_pod_status_ready{namespace=\"$namespace\", condition=\"true\"}",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Request Rate (req/s by service)",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(http_requests_total{namespace=\"$namespace\"}[5m])) by (job)",
+              "legendFormat": "{{job}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" } }
+        },
+        {
+          "id": 4,
+          "title": "Request Latency (p95, seconds)",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, job))",
+              "legendFormat": "{{job}} p95",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 5,
+          "title": "Error Responses (4xx/5xx rate by service)",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 8, "x": 8, "y": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(http_requests_total{namespace=\"$namespace\", status_code=~\"4..|5..\"}[5m])) by (job, status_code)",
+              "legendFormat": "{{job}} {{status_code}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" } }
+        },
+        {
+          "id": 6,
+          "title": "CPU Usage by Pod (cores)",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 8, "x": 16, "y": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", pod!=\"\"}[5m])) by (pod)",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 7,
+          "title": "Memory Usage by Pod (working set)",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"$namespace\", pod!=\"\"}) by (pod)",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "id": 8,
+          "title": "CloudCrafter Logs",
+          "type": "logs",
+          "gridPos": { "h": 10, "w": 16, "x": 8, "y": 12 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "{namespace=\"$namespace\", app=~\"users|events|tickets|notifications\"}",
+              "refId": "A"
+            }
+          ],
+          "options": { "showTime": true, "sortOrder": "Descending" }
+        }
+      ]
+    }
+kind: ConfigMap
+metadata:
+  name: cloudcrafter-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"

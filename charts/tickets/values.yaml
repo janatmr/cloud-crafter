@@ -9,6 +9,12 @@ service:
   type: ClusterIP
   port: 3000
 
+# Scraped by kube-prometheus-stack's Prometheus Operator (spec §22/§23) — requires
+# the ServiceMonitor CRD to already exist in the cluster (installed with the
+# observability stack). Disable if that CRD isn't installed yet.
+serviceMonitor:
+  enabled: true
+
 resources:
   requests:
     cpu: 75m

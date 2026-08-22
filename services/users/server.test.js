@@ -39,3 +39,10 @@ test("GET /protected with an invalid token returns 403", async () => {
   const res = await request(app).get("/protected").set("Authorization", "Bearer not-a-real-token");
   assert.equal(res.status, 403);
 });
+
+test("GET /metrics exposes prometheus metrics without leaking key material", async () => {
+  const res = await request(app).get("/metrics");
+  assert.equal(res.status, 200);
+  assert.match(res.text, /http_requests_total/);
+  assert.doesNotMatch(res.text, /BEGIN (RSA )?PRIVATE KEY/);
+});

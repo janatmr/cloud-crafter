@@ -29,3 +29,9 @@ test("GET /notifications lists created notifications", async () => {
   assert.ok(Array.isArray(res.body));
   assert.ok(res.body.length > 0);
 });
+
+test("GET /metrics exposes prometheus metrics", async () => {
+  const res = await request(app).get("/metrics");
+  assert.equal(res.status, 200);
+  assert.match(res.text, /http_requests_total/);
+});

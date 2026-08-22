@@ -19,7 +19,7 @@ placeholders until their phase lands.
 - [x] Phase 5 — CI/CD
 - [x] Phase 6 — Argo CD
 - [x] Phase 7 — Multi-cloud namespace proof
-- [ ] Phase 8 — Observability
+- [x] Phase 8 — Observability
 - [ ] Phase 9 — JWT key rotation hardening
 - [ ] Phase 10 — Final verification & demo
 
@@ -65,8 +65,7 @@ tracked tree and `*.key`/`*.pem` are gitignored. Key paths are now configurable 
 Git history itself has not been rewritten (that requires a force-push and separate
 explicit authorization).
 
-Remaining sections (Argo CD, Multi-cloud, Observability, JWT rotation, Verification)
-are added as their phases complete.
+Remaining sections (JWT rotation, Verification) are added as their phases complete.
 
 ## Local Kubernetes (Minikube)
 
@@ -676,3 +675,125 @@ needed to change here for the chart to be portable across namespaces.
 in this environment. If a real multi-account/multi-cluster setup is ever used instead of
 one Minikube cluster with two namespaces, the same `helm upgrade --install` commands
 apply unchanged per target cluster.
+
+---
+
+## Observability (spec §22-§25)
+
+Real metrics, real logs, one real Grafana dashboard — built on the standard, maintained
+`kube-prometheus-stack` (Prometheus + Grafana) and `loki-stack` (Loki + Promtail) Helm
+charts, per spec §22's explicit instruction not to hand-roll a monitoring stack. Full
+detail (install commands, panel queries, datasource wiring) lives in
+`observability/README.md`; this section is the "it actually ran" record.
+
+**Metrics.** All four services now use `prom-client` to expose `GET /metrics`
+(`http_requests_total`, `http_request_duration_seconds`, default Node.js process
+metrics). Each service chart (`charts/{users,events,tickets,notifications}`) gained a
+named `http` Service port and a `ServiceMonitor` (`serviceMonitor.enabled`, default
+`true`) so Prometheus Operator scrapes it automatically.
+
+```sh
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+
+helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace \
+  -f observability/prometheus/values.yaml -f observability/grafana/values.yaml
+helm install loki grafana/loki-stack -n monitoring -f observability/loki/values.yaml
+kubectl apply -f observability/grafana/dashboard-configmap.yaml
+```
+
+Installed into the same Minikube cluster used since Phase 2. **Environment note:** the
+Minikube VM was memory-capped at 4GB, which the full stack pushed to ~99%, causing the
+Kubernetes API server to time out under sustained load. Fixed by resizing the container
+in place (`docker update --memory=8g --memory-swap=8g minikube` + `docker start`,
+followed by `minikube start` to repair the kubeconfig's dynamically-reassigned ports) —
+this preserves all cluster state (the Minikube data volume is separate from the
+container), unlike `minikube delete`. All pre-existing namespaces (`argocd`, `default`,
+`aws`, `google-cloud`, plus an unrelated `healthcare` project already in this cluster)
+came back healthy afterward.
+
+**Redeployed `charts/cloudcrafter`** to `aws` and `google-cloud` (not Argo CD-managed, so
+a direct `helm upgrade` is the right tool — same pattern as Phase 7) to pick up the new
+`ServiceMonitor`/named-port templates; the Argo CD-managed `default` namespace picks
+this up on its next git-driven sync, same as every other chart change since Phase 6.
+
+```
+$ helm upgrade --install cloudcrafter ./charts/cloudcrafter -n aws \
+    -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-aws.yaml
+Release "cloudcrafter" has been upgraded. Happy Helming!
+```
+
+Prometheus discovering and scraping all four services in both namespaces:
+
+```
+$ curl -s http://localhost:9090/api/v1/targets | ...
+events aws up http://10.244.0.87:3000/metrics
+notifications aws up http://10.244.0.117:3000/metrics
+tickets aws up http://10.244.0.110:3000/metrics
+users aws up http://10.244.0.100:3000/metrics
+events google-cloud up ...
+notifications google-cloud up ...
+tickets google-cloud up ...
+users google-cloud up ...
+```
+
+**Logs.** `loki-stack`'s Promtail DaemonSet ingests every pod's stdout/stderr, tagged
+with `namespace`/`pod`/`app` labels from Kubernetes metadata — no application code
+changes needed. A real query through Grafana's own datasource proxy against the `aws`
+namespace returned genuine service-startup log lines:
+
+```
+$ curl ... /api/ds/query '{"queries":[{"datasource":{"type":"loki","uid":"loki"},
+    "expr":"{namespace=\"aws\", app=\"notifications\"}"}], ...}'
+{"log":"Notifications service listening on port 3000\n","stream":"stdout", ...}
+```
+
+**Logging hygiene audit (spec §24):** every `console.log`/`console.error` call across
+`services/*` was reviewed — only service-startup lines, notification records, and S3
+bucket/key names appear; none logs private keys, passwords, JWT signing material, or
+complete bearer tokens.
+
+**Grafana.** Prometheus (uid `prometheus`) and Loki (uid `loki`) datasources are both
+auto-provisioned — Prometheus by `kube-prometheus-stack` itself, Loki by the `loki-stack`
+chart's own sidecar-discovered ConfigMap (with `isDefault: false` explicitly set — its
+chart default is `true`, which collides with Prometheus's default datasource and crashes
+Grafana on startup with "only one datasource per organization can be marked as
+default"; `observability/README.md` documents this in full). The **CloudCrafter**
+dashboard (`observability/grafana/dashboards/cloudcrafter-dashboard.json`) auto-loads via
+Grafana's dashboard sidecar and has a `$namespace` picker (default/aws/google-cloud) plus
+eight panels — Service Health, Pod Readiness, Request Rate, Request Latency (p95), Error
+Responses, CPU Usage by Pod, Memory Usage by Pod, and a live Logs panel — all backed by
+real Prometheus/Loki queries, no hardcoded values.
+
+**Verified with a real traffic burst** against the `aws` namespace (mixed
+200/201/400/401 responses via `POST /tickets`, `POST /login`, `GET /events`, etc.),
+queried back through Grafana's own `/api/ds/query` proxy — not just Prometheus directly:
+
+```
+$ curl ... /api/ds/query  (Request Rate panel query, instant)
+job=events   0.365 req/s
+job=notifications 0.733 req/s
+job=users    0.733 req/s
+job=tickets  0.365 req/s
+```
+
+All seven Prometheus-backed panels and the Loki logs panel (78 matching lines) returned
+non-empty, real data this way. One environment-specific fix along the way: this
+cluster's cAdvisor output has no per-container breakdown (only pod-level cgroup
+aggregates, no `container` label at all), so the CPU/memory queries filter on
+`pod!=""` rather than the more common `container!="", container!="POD"` pattern, which
+returned nothing here.
+
+Retrieve the Grafana admin password (auto-generated by the chart, never committed to
+this repo):
+
+```sh
+kubectl get secret -n monitoring kube-prometheus-stack-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d
+```
+
+**Manual action still required:** none for the `aws`/`google-cloud` namespaces (both
+fully verified above). The Argo CD-managed `default` namespace needs its next sync (automatic, or triggered with the same `argocd.argoproj.io/refresh=hard` annotation used in
+Phase 6) to pick up the `ServiceMonitor`/named-port chart changes and start being scraped
+too — functionally identical to every other post-Phase-6 chart change in this repo.

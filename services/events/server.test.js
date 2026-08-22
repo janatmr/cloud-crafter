@@ -40,3 +40,9 @@ test("POST /events with missing fields returns 400", async () => {
   const res = await request(app).post("/events").send({ name: "Missing fields" });
   assert.equal(res.status, 400);
 });
+
+test("GET /metrics exposes prometheus metrics", async () => {
+  const res = await request(app).get("/metrics");
+  assert.equal(res.status, 200);
+  assert.match(res.text, /http_requests_total/);
+});

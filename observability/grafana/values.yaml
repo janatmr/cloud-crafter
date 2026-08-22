@@ -1,0 +1,31 @@
+# Grafana ships as a sub-chart of prometheus-community/kube-prometheus-stack — this
+# file only overrides the `grafana:` block of that chart's values (spec §25). Pass
+# alongside ../prometheus/values.yaml; see that file's header for the install command.
+
+grafana:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # The Prometheus datasource is auto-provisioned by kube-prometheus-stack. Loki's
+  # datasource is auto-provisioned too — not from here, but from the loki-stack
+  # chart's own sidecar-discovered ConfigMap (see ../loki/values.yaml, which pins its
+  # uid to "loki" and turns off its isDefault so it doesn't collide with Prometheus).
+  # The sidecar that finds it is enabled below.
+  sidecar:
+    datasources:
+      enabled: true
+
+  # Auto-load any ConfigMap in the cluster labeled grafana_dashboard=1 — this is how
+  # ./dashboards/cloudcrafter-dashboard.json (wrapped by ./dashboard-configmap.yaml)
+  # gets provisioned into Grafana without a manual import (spec §25).
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL

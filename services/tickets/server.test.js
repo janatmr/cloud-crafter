@@ -30,3 +30,10 @@ test("GET /tickets lists created tickets", async () => {
   assert.ok(Array.isArray(res.body));
   assert.ok(res.body.length > 0);
 });
+
+test("GET /metrics exposes prometheus metrics", async () => {
+  const res = await request(app).get("/metrics");
+  assert.equal(res.status, 200);
+  assert.match(res.text, /http_requests_total/);
+  assert.doesNotMatch(res.text, /AWS_SECRET_ACCESS_KEY|accessKeyId/i);
+});

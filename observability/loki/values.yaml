@@ -1,0 +1,36 @@
+# Values override for the grafana/loki-stack chart (Loki + Promtail) (spec §22/§24) —
+# aggregates application/container logs, not a hand-built log pipeline.
+#
+# Install:
+#   helm upgrade --install loki grafana/loki-stack -n monitoring --create-namespace \
+#     -f observability/loki/values.yaml
+
+loki:
+  # This chart auto-registers itself as a Grafana datasource (via sidecar discovery,
+  # spec §25) with isDefault: true by default — that collides with kube-prometheus-
+  # stack's own default Prometheus datasource ("only one datasource per organization
+  # can be marked as default", which crashes Grafana on startup). Prometheus stays
+  # the default; pin a stable uid so the dashboard JSON can reference it directly.
+  isDefault: false
+  datasource:
+    uid: loki
+  # No persistent volume for a local Minikube demo — logs only need to survive long
+  # enough to be searched during verification, not across cluster restarts.
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+promtail:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi

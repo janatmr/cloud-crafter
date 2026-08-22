@@ -1,0 +1,50 @@
+# Values override for the prometheus-community/kube-prometheus-stack chart
+# (spec §22/§23) — not a hand-built monitoring stack, just overrides on top of the
+# standard maintained chart. Grafana ships as a sub-chart of this same release; its
+# overrides live in ../grafana/values.yaml and get passed alongside this file.
+#
+# Install:
+#   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace \
+#     -f observability/prometheus/values.yaml \
+#     -f observability/grafana/values.yaml
+
+alertmanager:
+  # Alerting isn't part of the spec (§22-§25 only ask for metrics/logs/dashboards) —
+  # disabling it keeps the footprint down on a local Minikube cluster.
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # Discover every ServiceMonitor created by charts/{users,events,tickets,notifications}
+    # across all namespaces (default/aws/google-cloud) regardless of Helm release label —
+    # required since those ServiceMonitors don't carry this release's own label selector.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 6h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# Provides pod/container CPU + memory metrics for the Grafana dashboard (spec §23's
+# "CPU and memory visibility" requirement) via cAdvisor/kubelet scraping, enabled by
+# default in this chart — kept on explicitly for clarity.
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
