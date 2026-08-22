@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/janatmr/cloud-crafter/events
-  tag: "2c48a11c44a0b4e4d27d3c194176cb0149d3907a"
+  tag: "91697c84c8923cbda6560201a3f988dc940ee9c2"
   pullPolicy: IfNotPresent
 
 service:
