@@ -18,7 +18,7 @@ users:
 events:
   image:
     repository: events
-    tag: "1.0.0"
+    tag: "1.0.1"
 tickets:
   image:
     repository: tickets
