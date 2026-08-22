@@ -20,7 +20,7 @@ placeholders until their phase lands.
 - [x] Phase 6 — Argo CD
 - [x] Phase 7 — Multi-cloud namespace proof
 - [x] Phase 8 — Observability
-- [ ] Phase 9 — JWT key rotation hardening
+- [x] Phase 9 — JWT key rotation hardening
 - [ ] Phase 10 — Final verification & demo
 
 ## Services
@@ -797,3 +797,105 @@ kubectl get secret -n monitoring kube-prometheus-stack-grafana \
 fully verified above). The Argo CD-managed `default` namespace needs its next sync (automatic, or triggered with the same `argocd.argoproj.io/refresh=hard` annotation used in
 Phase 6) to pick up the `ServiceMonitor`/named-port chart changes and start being scraped
 too — functionally identical to every other post-Phase-6 chart change in this repo.
+
+---
+
+## JWT key rotation (spec §26–§32)
+
+The `users-jwt-keys` Secret (created out-of-band, not templated by the chart — see the
+Helm charts section) holds the RS256 keypair `charts/users` mounts at `/etc/jwt-keys` and
+points `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` at. Rotation is: generate a fresh
+keypair → overwrite the Secret → roll the Deployment → confirm the **old** token is
+rejected and the **new** token is accepted, with zero dropped requests throughout.
+
+**Generating and swapping the keypair** (`default` namespace; new keys generated with
+`openssl`, never committed):
+
+```sh
+openssl genrsa -out private.key 2048
+openssl rsa -in private.key -pubout -out public.key
+
+kubectl create secret generic users-jwt-keys -n default \
+  --from-file=private.key=private.key --from-file=public.key=public.key \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl rollout restart deployment/users -n default
+kubectl rollout status deployment/users -n default
+```
+
+**Old-token-rejected / new-token-accepted proof** — a token obtained from `/login`
+*before* the rotation is checked against `/protected` *after* it, then a fresh login is
+checked too (tokens redacted per spec §31 — only the header/verdict shown):
+
+```
+$ curl -s -X POST http://users/login -d '{"username":"demo","password":"demo123"}'
+{"token":"eyJhbGciOiJSUzI1NiIs...<redacted>"}          # signed with the pre-rotation key
+$ curl -s -o /dev/null -w '%{http_code}' http://users/protected -H "Authorization: Bearer <old token>"
+200                                                      # confirmed valid before rotation
+
+# ... keypair generated, Secret updated, `kubectl rollout restart` completes ...
+
+$ curl -s http://users/protected -H "Authorization: Bearer <old token>"
+{"error":"invalid or expired token","details":"invalid signature"}
+HTTP 403                                                 # old key rejected — no dual-key acceptance
+$ curl -s -X POST http://users/login -d '{"username":"demo","password":"demo123"}'
+{"token":"eyJhbGciOiJSUzI1NiIs...<redacted>"}           # signed with the new key
+$ curl -s http://users/protected -H "Authorization: Bearer <new token>"
+{"message":"access granted","user":{"sub":1,"username":"demo",...}}
+HTTP 200
+```
+
+**Zero-downtime proof, and a real bug found along the way (spec §32).** The first
+attempt used `kubectl port-forward svc/users` as the load generator during the rollout
+and saw dropped connections — but that was a flaw in the *test*, not the rollout:
+`port-forward` against a Service pins to one specific backend pod for its whole
+lifetime, so when that exact pod was terminated mid-rollout, the forwarded connection
+broke. That's not how the Service's `ClusterIP` behaves for a real client, so the test
+was redone from inside the cluster, hitting the Service's DNS name directly (which does
+load-balance across every ready pod):
+
+```sh
+kubectl run zero-downtime-probe --image=curlimages/curl:8.10.1 --restart=Never --command -- \
+  sh -c 'for i in $(seq 1 150); do curl -s -o /dev/null -w "%{http_code}\n" \
+    --max-time 2 http://users.default.svc.cluster.local:3000/health; sleep 0.2; done'
+```
+
+With the corrected methodology, the *first* rotation still dropped 5 of 150 requests
+(`000` — connection refused) during the window pods were being replaced. Root cause:
+`services/users` has no `preStop` hook, so `SIGTERM` kills the Node process immediately;
+kube-proxy's removal of the terminating pod from the Service's endpoints isn't
+instantaneous, so a pod that has already stopped listening can still receive a
+newly-routed connection for a brief window. This is a standard Kubernetes rolling-update
+race, not specific to JWT rotation — the fix is the standard one: delay `SIGTERM` with a
+`preStop` sleep so the pod keeps accepting connections until kube-proxy has caught up.
+Added to `charts/users/templates/deployment.yaml` (`lifecycle.preStop`, sleep duration
+from the new `values.yaml` key `preStopSleepSeconds: 5`).
+
+Re-run after the fix, same in-cluster probe, same rotation procedure, `aws` namespace
+first (plain `helm upgrade`, to validate the fix without touching the Argo-managed
+release) and then `default`:
+
+```
+$ kubectl logs zero-downtime-probe -n aws | grep -v 'health=200' || echo "NONE — all 200"
+NONE — all 200
+$ kubectl logs zero-downtime-probe -n default | grep -v 'health=200' || echo "NONE — all 200"
+NONE — all 200
+```
+
+150/150 requests returned `200` in both namespaces across the full rollout — the rolling
+update (`maxUnavailable: 0`, `maxSurge: 1`, `replicaCount: 2`, readiness/liveness probes
+from Phase 4, `preStop` delay from this phase) never drops traffic.
+
+**How this was rolled out.** The chart fix (`charts/users/templates/deployment.yaml`,
+`charts/users/values.yaml`) was validated directly against `aws`/`google-cloud`
+(`helm upgrade`, not Argo-managed) and is committed here for Argo CD to pick up in
+`default` the same way every other chart change has since Phase 6. To run the actual
+rotation proof against `default` *before* that commit was pushed, the same `preStop`
+hook was also applied there with a one-off `kubectl patch deployment/users -n default`
+— an imperative step, in the same spirit as the imperative `users-jwt-keys` bootstrap
+back in the Local Kubernetes section, made permanent by the chart commit rather than
+left as a manual, undocumented drift.
+
+**Manual action still required:** push the chart commit so Argo CD's next sync (or a
+forced refresh, per the Argo CD section) reconciles `default`'s `Deployment/users`
+declaratively — right now it matches the chart only because of the imperative patch
+above.

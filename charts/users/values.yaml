@@ -29,6 +29,11 @@ rollingUpdate:
   maxUnavailable: 0
   maxSurge: 1
 
+# Delay between SIGTERM and process exit (preStop hook) so kube-proxy has time
+# to drop this pod from the Service's endpoints before it stops accepting
+# connections — closes the race that otherwise drops requests mid-rollout.
+preStopSleepSeconds: 5
+
 env:
   - name: PORT
     value: "3000"

@@ -50,6 +50,15 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          lifecycle:
+            preStop:
+              exec:
+                # Gives kube-proxy time to remove this pod from the Service's
+                # endpoints before SIGTERM stops the process — without this,
+                # in-flight/newly-routed connections during a rolling update
+                # can hit a pod that has already stopped accepting traffic
+                # (spec §32: zero dropped requests during rotation rollout).
+                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds }}"]
           {{- if .Values.jwtKeys.enabled }}
           volumeMounts:
             - name: jwt-keys
