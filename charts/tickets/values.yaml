@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/janatmr/cloud-crafter/tickets
-  tag: "91697c84c8923cbda6560201a3f988dc940ee9c2"
+  tag: "6610f869466fda431bbda9e82f5d8a931dc713b0"
   pullPolicy: IfNotPresent
 
 service:
