@@ -2,7 +2,7 @@ replicaCount: 2
 
 image:
   repository: ghcr.io/janatmr/cloud-crafter/users
-  tag: "d0ad3f5b8c45634de8fb2e1a27c1c1cf752a4afa"
+  tag: "4d0b02761457f5723c1e0d18e79aaf607a3c6025"
   pullPolicy: IfNotPresent
 
 service:
