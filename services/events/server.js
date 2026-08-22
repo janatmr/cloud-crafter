@@ -1,5 +1,6 @@
 const express = require("express");
 const client = require("prom-client");
+const { version } = require("./package.json");
 const app = express();
 app.use(express.json());
 
@@ -50,7 +51,7 @@ let EVENTS = [
 ];
 let nextId = 3;
 
-app.get("/health", (_req, res) => res.json({ status: "ok", service: "events" }));
+app.get("/health", (_req, res) => res.json({ status: "ok", service: "events", version }));
 
 app.get("/events", (_req, res) => res.json(EVENTS));
 

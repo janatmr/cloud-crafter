@@ -1,6 +1,6 @@
 {
   "name": "cloudcrafter-events",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CloudCrafter Events service — lists and creates events.",
   "main": "server.js",
   "scripts": {
