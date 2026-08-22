@@ -21,7 +21,109 @@ placeholders until their phase lands.
 - [x] Phase 7 — Multi-cloud namespace proof
 - [x] Phase 8 — Observability
 - [x] Phase 9 — JWT key rotation hardening
-- [ ] Phase 10 — Final verification & demo
+- [x] Phase 10 — Final verification & demo
+
+## Architecture
+
+```text
+                    ┌───────────────┐
+                    │    Ingress    │  (nginx; /api/{users,events,tickets,notifications})
+                    └───────┬───────┘
+                            │
+       ┌────────────────────┼────────────────────┐
+       ↓                    ↓                    ↓
+    Users                Events               Tickets
+  (RS256 JWT,                                    │
+   /login, /protected)                           ↓
+                                             S3 / LocalStack
+                                          (cloudcrafter-ticket-receipts)
+                                                  │
+                                                  ↓
+                                               Lambda
+                                        (receipt-notification, S3-triggered)
+                                                  │
+                                                  ↓
+                                            Notifications
+                                             (POST /notify)
+```
+
+Each of the four services also exposes `GET /metrics` (Prometheus) and ships stdout/stderr
+to Loki; `GET /health` backs both the Ingress checks and the chart's readiness/liveness
+probes.
+
+**Deployment pipeline** (spec §18 — CI never touches the cluster):
+
+```text
+git push → GitHub Actions CI (test → docker build → helm validate)
+         → GHCR image push (immutable tag) → commit chart image.tag bump
+         → Argo CD (polls/refreshes git) → sync → Kubernetes
+```
+
+**Observability pipeline** (spec §22):
+
+```text
+Prometheus (scrapes /metrics via ServiceMonitor) ─┐
+Loki (ingests pod stdout/stderr via Promtail)     ┴→ Grafana (CloudCrafter dashboard)
+```
+
+The same `charts/cloudcrafter` release is installed unmodified into three namespaces
+(`default`, `aws`, `google-cloud`) to prove multi-cloud portability — see
+"Multi-cloud namespace proof" below.
+
+## Setup
+
+**Prerequisites** (all confirmed available/installed in this environment as each phase
+needed them):
+
+- [Node.js 18+](https://nodejs.org/) and npm — service development/tests
+- [Docker](https://www.docker.com/) — image builds, LocalStack, Minikube's container driver
+- [Minikube](https://minikube.sigs.k8s.io/) — local Kubernetes cluster
+- `kubectl` — matching the cluster's Kubernetes version
+- [Helm 3](https://helm.sh/) — chart packaging/deployment (installed as a portable
+  binary here, see the Helm charts section)
+- `openssl` — RS256 keypair generation (JWT rotation)
+- LocalStack's `awslocal` (or `aws --endpoint-url`) — S3/Lambda interaction
+- A GitHub account with a public (or credentialed) remote — CI/CD + Argo CD's git source
+
+**Bring the whole system up, in order** (each command is documented in full, with real
+captured output, in its own section below):
+
+```sh
+# 1. Local Kubernetes baseline
+minikube start
+minikube addons enable ingress
+eval $(minikube docker-env)
+for s in users events tickets notifications; do docker build -t $s:1.0.0 services/$s; done
+kubectl apply -f k8s/    # or skip straight to Helm — see below
+
+# 2. LocalStack event flow
+cd localstack && bash scripts/setup.sh && cd ..
+
+# 3. Helm (replaces the raw k8s/ manifests as the deployable artifact)
+helm dependency build charts/cloudcrafter
+helm upgrade --install cloudcrafter ./charts/cloudcrafter \
+  -f charts/cloudcrafter/values-minikube.yaml
+
+# 4. Argo CD (one-time; see argocd/README.md)
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
+kubectl apply -f argocd/application.yaml
+
+# 5. Multi-cloud proof
+helm upgrade --install cloudcrafter ./charts/cloudcrafter -n aws --create-namespace \
+  -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-aws.yaml
+helm upgrade --install cloudcrafter ./charts/cloudcrafter -n google-cloud --create-namespace \
+  -f charts/cloudcrafter/values-minikube.yaml -f charts/cloudcrafter/values-google-cloud.yaml
+
+# 6. Observability (see observability/README.md)
+helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace \
+  -f observability/prometheus/values.yaml -f observability/grafana/values.yaml
+helm install loki grafana/loki-stack -n monitoring -f observability/loki/values.yaml
+kubectl apply -f observability/grafana/dashboard-configmap.yaml
+
+# 7. Verify everything
+bash scripts/verify.sh
+```
 
 ## Services
 
@@ -916,3 +1018,274 @@ git-reconciled.
 picked up the fix via the direct `helm upgrade` used to validate it (see above); they are
 not Argo CD-managed, so they don't get this commit automatically and would need the same
 `helm upgrade` re-run if verifying them again after a future chart change.
+
+---
+
+## Verification (spec §34)
+
+`scripts/verify.sh` runs every check below against the live cluster — read-only, no
+rollouts or key rotations. It requires an Ingress reachable at `INGRESS_ADDR`
+(default `127.0.0.1:18080`, i.e. `kubectl port-forward -n ingress-nginx
+svc/ingress-nginx-controller 18080:80` — the same Windows/Minikube-docker-driver
+workaround used throughout this README):
+
+```sh
+kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 18080:80 &
+bash scripts/verify.sh
+```
+
+Every command inside it was actually run against this repository's cluster before being
+added — nothing in it is aspirational. A fresh run right before writing this section
+confirmed: all pods Running across `default`/`aws`/`google-cloud`, `helm lint`/`helm
+template` clean on all five charts, `deployment/users` rollout status clean, all twelve
+Ingress health routes (four services × three namespaces) returning 200 with the correct
+service body, the Argo CD `Application` `Synced`/`Healthy`, the LocalStack S3 bucket
+populated with receipts and the Lambda `Active`/`Successful`, and the full `monitoring`
+namespace `Running`.
+
+---
+
+## Phase 10 — Final demo (spec §33)
+
+Real, captured output for the spec's A→J demo sequence, run in this order against the
+live system described above.
+
+### A. Repository structure
+
+```
+services/       k8s/       charts/       localstack/       argocd/       observability/
+.github/workflows/
+```
+
+```
+$ ls charts/
+cloudcrafter  events  notifications  tickets  users
+```
+
+### B. One real code change
+
+Commit
+[`91697c8`](https://github.com/janatmr/cloud-crafter/commit/91697c84c8923cbda6560201a3f988dc940ee9c2)
+adds a `version` field (read from `package.json`) to the Events service's `GET /health`
+response and bumps `services/events/package.json` to `1.0.1` — small, real, and
+non-breaking (the existing test suite, which doesn't assert an exact health body,
+still passes unmodified).
+
+### C. CI
+
+Pushing `91697c8` ran the real workflow —
+[run 32543115265](https://github.com/janatmr/cloud-crafter/actions/runs/32543115265),
+polled via the GitHub REST API to completion:
+
+```
+test (users|events|tickets|notifications)   completed success
+docker-build (users|events|tickets|notifications)  completed success
+helm-validate                                completed success
+release-images (users|events|tickets|notifications) completed success
+bump-chart-values                            completed success
+```
+
+`bump-chart-values` landed
+[`89b87f4`](https://github.com/janatmr/cloud-crafter/commit/89b87f4c02f8df06963074b5d3f2ec605af1a027)
+— every `charts/<service>/values.yaml` now points `image.tag` at `91697c8`'s commit SHA.
+This Minikube cluster has no route to pull the real `ghcr.io/janatmr/cloud-crafter/*`
+images (the open GHCR-visibility action noted in the CI/CD section), so a second commit,
+[`6610f86`](https://github.com/janatmr/cloud-crafter/commit/6610f869466fda431bbda9e82f5d8a931dc713b0),
+bumped the `values-minikube.yaml` overlay's `events.image.tag` to `1.0.1` after building
+that exact tag straight into Minikube's Docker daemon — which re-ran the same workflow
+([run 32543286947](https://github.com/janatmr/cloud-crafter/actions/runs/32543286947),
+also fully green) and its own `bump-chart-values` follow-up,
+[`9e04691`](https://github.com/janatmr/cloud-crafter/commit/9e0469144c4d8a24fda01fe1a8c03b5e684c9ad8).
+
+### D. Argo CD
+
+```
+$ kubectl -n argocd annotate application cloudcrafter argocd.argoproj.io/refresh=hard --overwrite
+application.argoproj.io/cloudcrafter annotated
+$ kubectl -n argocd get application cloudcrafter -o jsonpath='{.status.sync.status} {.status.health.status} {.status.sync.revision}'
+Synced Healthy 9e0469144c4d8a24fda01fe1a8c03b5e684c9ad8
+```
+
+The `default` namespace's `Deployment/events` picked up the new image and rolled
+without being touched by hand:
+
+```
+$ kubectl get deploy events -n default -o jsonpath='{.spec.template.spec.containers[0].image}'
+events:1.0.1
+$ kubectl rollout status deployment/events -n default
+deployment "events" successfully rolled out
+```
+
+### E. Kubernetes
+
+```
+$ kubectl get pods -n default
+events-...          1/1   Running
+notifications-...   1/1   Running   (x2)
+tickets-...          1/1   Running
+users-...            1/1   Running  (x2)
+
+$ kubectl get svc -n default
+events, notifications, tickets, users — all ClusterIP, port 3000
+
+$ kubectl get ingress -n default
+cloudcrafter-ingress   nginx   cloudcrafter.local   192.168.49.2   80
+```
+
+### F. Ingress — the code change, visible end to end
+
+```
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/users/health
+{"status":"ok","service":"users"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/events/health
+{"status":"ok","service":"events","version":"1.0.1"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/tickets/health
+{"status":"ok","service":"tickets"}
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/notifications/health
+{"status":"ok","service":"notifications"}
+```
+
+The `"version":"1.0.1"` field is commit `91697c8`'s code, now running in the cluster
+purely because it was pushed to `main` — no `kubectl apply`/`helm upgrade` was run for
+the application change itself, only for the one-time local-image overlay this
+GHCR-visibility-limited environment needs (step C).
+
+### G. Grafana
+
+Queried live through Grafana's own datasource proxy (`/api/datasources/proxy/uid/...`),
+not Prometheus/Loki directly:
+
+```
+$ curl .../api/datasources  →  Prometheus (default) + Loki, both present
+$ curl .../api/search?query=CloudCrafter  →  dashboard "CloudCrafter" (uid cloudcrafter-overview)
+
+Request Rate (sum(rate(http_requests_total{namespace="default"}[5m])) by (job)):
+  notifications 0.744 req/s   users 0.744 req/s   tickets 0.368 req/s   events 0.387 req/s
+CPU by pod:      7 series returned
+Memory by pod:   6 series returned
+Pod readiness:   6 ready pods
+Logs (Loki, {namespace="default", app="events"}): real lines returned, including the
+  outgoing events pod's own shutdown log during the Argo CD-driven rollout in step D.
+```
+
+### H. JWT security
+
+A full rotation cycle run fresh for this demo (`default` namespace) — generate keypair →
+update `users-jwt-keys` Secret → roll `deployment/users` → confirm old/new tokens (tokens
+redacted per spec §31):
+
+```
+$ curl -X POST http://users/login -d '{"username":"demo","password":"demo123"}'
+{"token":"eyJhbGciOiJSUzI1NiIs...<redacted>"}
+$ curl http://users/protected -H "Authorization: Bearer <token>"   → 200   (pre-rotation)
+
+# openssl genrsa/rsa -> kubectl apply Secret -> kubectl rollout restart deployment/users
+$ kubectl rollout status deployment/users -n default
+deployment "users" successfully rolled out
+
+$ curl http://users/protected -H "Authorization: Bearer <old token>"
+{"error":"invalid or expired token","details":"invalid signature"}   → 403
+$ curl -X POST http://users/login -d '{"username":"demo","password":"demo123"}'
+{"token":"eyJhbGciOiJSUzI1NiIs...<redacted>"}   (new key)
+$ curl http://users/protected -H "Authorization: Bearer <new token>"
+{"message":"access granted", ...}   → 200
+```
+
+Zero-downtime, verified via an in-cluster probe hitting the Service's DNS name (not
+`port-forward`, which pins to a single backend pod — see the JWT rotation section above
+for why that matters) for the full duration of the rollout:
+
+```
+$ kubectl logs zero-downtime-probe -n default | sort | uniq -c
+    150 200
+```
+
+150/150 requests returned `200` — no dropped traffic during the rotation.
+
+### I. LocalStack — automatic event flow
+
+One `POST /tickets`, no manual Lambda invocation, through the Ingress:
+
+```
+$ curl -H "Host: cloudcrafter.local" -X POST -d '{"eventId":2,"userId":99}' \
+    -H "Content-Type: application/json" http://127.0.0.1:18080/api/tickets/tickets
+{"id":1,"eventId":2,"userId":99,"issuedAt":"2026-08-22T01:25:44.341Z","receiptId":"receipt-1787361944341"}
+
+$ docker exec cloudcrafter-localstack awslocal s3 ls s3://cloudcrafter-ticket-receipts --recursive | grep user-99
+2026-08-22 01:25:44        106 receipts/ticket-1-user-99.json
+
+$ curl -H "Host: cloudcrafter.local" http://127.0.0.1:18080/api/notifications/notifications
+[..., {"id":7,"message":"Ticket receipt uploaded: receipts/ticket-1-user-99.json","userId":99,"sentAt":"2026-08-22T01:25:45.532Z"}]
+```
+
+The notification appeared ~1.2s after the ticket was created — the S3 event drove it,
+not the `POST /tickets` request itself.
+
+### J. Multi-cloud
+
+```
+$ kubectl get pods,svc,ingress -n aws
+$ kubectl get pods,svc,ingress -n google-cloud
+```
+
+Both fully `Running`/`Ready`; the same four Ingress routes return 200 in both, on their
+own distinct hosts (`cloudcrafter-aws.local`, `cloudcrafter-google-cloud.local`) through
+the one shared Ingress controller — see "Multi-cloud namespace proof" above for the full
+output.
+
+---
+
+## Definition of Done (spec §42)
+
+Walked against the real, live system state captured throughout this README — every box
+below reflects an observed result, not an assumption.
+
+**BUILT** — [x] Users [x] Events [x] Tickets [x] Notifications all respond correctly
+(Ingress checks above); [x] Docker images build (all four, most recently `events:1.0.1`
+in this phase); [x] automated tests pass (`node --test`, all four services, most recently
+in CI runs 32543115265/32543286947).
+
+**EVENTS** — [x] LocalStack starts (`cloudcrafter-localstack`, healthy) [x] S3 bucket
+exists [x] receipt uploaded [x] S3 automatically invokes Lambda [x] Lambda reaches
+Notifications [x] notification appears [x] no manual Lambda invocation anywhere in the
+flow (step I above).
+
+**PACKAGED** — [x] four service charts [x] root `cloudcrafter` chart [x] Deployment
+templates [x] Service templates [x] values files [x] resource requests/limits (sized per
+service, not copy-pasted) [x] readiness/liveness probes [x] semantic chart versions
+(`1.0.0` on all five — `helm lint`/`helm template` clean, re-verified this phase).
+
+**AUTOMATED** — [x] CI tests [x] CI validates Helm [x] CI builds images [x] images
+published to GHCR [x] release/version process works (`bump-chart-values` commits
+`89b87f4`, `9e04691`) [x] Argo CD watches the repository [x] Argo CD syncs successfully
+(`Synced Healthy` at `9e04691...`, re-verified this phase).
+
+**DEPLOYED** — [x] Kubernetes cluster works [x] Ingress works [x] `aws` namespace works
+[x] `google-cloud` namespace works [x] same Helm release in both (`cloudcrafter-1.0.0`)
+[x] no cloud-specific source-code changes anywhere in `services/`/`charts/`.
+
+**MONITORED** — [x] Prometheus works [x] real metrics exist (non-zero request rate across
+all four services, re-verified this phase) [x] Loki works [x] real logs exist (live pod
+shutdown/startup lines) [x] Grafana works [x] Grafana has a Prometheus datasource [x]
+Grafana has a Loki datasource [x] dashboard shows useful data (all panels non-empty) [x]
+monitoring kept working through this phase's own Argo CD-driven rollout.
+
+**SECURED** — [x] starter private key removed from the tracked tree [x] new JWT keypair
+generated (a fresh one, for this phase's rotation) [x] key stored in the `users-jwt-keys`
+Secret [x] `users` loads keys from the Secret via `JWT_PRIVATE_KEY_PATH`/
+`JWT_PUBLIC_KEY_PATH` [x] rolling restart works [x] service stayed available throughout
+(150/150 `200`) [x] old token rejected (`403`) [x] new token accepted (`200`) [x] no
+private keys committed (`git ls-files` confirms none tracked; `*.key`/`*.pem`
+gitignored) [x] no credentials exposed in logs (Phase 8 audit, still true — no new
+logging added since).
+
+**DEMO** — [x] repository structure shown [x] a real code change shown [x] CI shown [x]
+Argo CD sync shown [x] Kubernetes health shown [x] Ingress shown (with the code change
+visibly live) [x] Grafana shown [x] JWT rotation proof shown [x] LocalStack event flow
+shown [x] multi-cloud proof shown — the full A→J sequence above.
+
+**Manual actions still required** (unchanged from earlier phases — nothing new
+introduced by Phase 10): GitHub branch protection for `main` and making the four GHCR
+packages public (or provisioning `imagePullSecret`s), both documented in the CI/CD
+section, both requiring org/repo admin access this environment doesn't have credentials
+for.
